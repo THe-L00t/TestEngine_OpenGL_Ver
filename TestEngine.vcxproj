@@ -130,10 +130,15 @@
     <ClCompile Include="Game.cpp" />
     <ClCompile Include="GameTimer.cpp" />
     <ClCompile Include="main.cpp" />
+    <ClCompile Include="Renderer.cpp" />
   </ItemGroup>
   <ItemGroup>
     <ClInclude Include="Game.h" />
     <ClInclude Include="GameTimer.h" />
+    <ClInclude Include="Renderer.hpp" />
+  </ItemGroup>
+  <ItemGroup>
+    <Text Include="GPT_ex.txt" />
   </ItemGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
   <ImportGroup Label="ExtensionTargets">

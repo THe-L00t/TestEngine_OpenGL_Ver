@@ -1,0 +1,392 @@
+﻿// Renderer.hpp — Single-class OpenGL 3.3 renderer (Modern C++)
+// 전제: GL 컨텍스트 생성/glewInit 등은 외부에서 완료.
+// 빌드: C++20 이상 권장. OpenGL 3.3 코어 프로필 가정.
+#pragma once
+#include <cstdint>
+#include <cstring>
+#include <span>
+#include <unordered_map>
+#include <vector>
+#include <array>
+#include <optional>
+#include <stdexcept>
+#include <string_view>
+#include <utility>
+#include <concepts>
+
+#include <GL/glew.h>
+
+class Renderer {
+public:
+  // Public opaque handles
+  using ShaderHandle   = uint32_t;
+  using BufferHandle   = uint32_t;
+  using MeshHandle     = uint32_t;
+  using MaterialHandle = uint32_t;
+
+  enum class BufferType : uint8_t { Vertex, Index, Uniform };
+  enum class IndexType  : uint8_t { U8, U16, U32 };
+
+  struct BufferDesc {
+    BufferType type{BufferType::Vertex};
+    size_t size{0};
+    GLenum usage{GL_STATIC_DRAW};
+  };
+
+  struct MeshDesc {
+    bool indexed{true};
+    IndexType indexType{IndexType::U32};
+    GLsizei vertexStride{sizeof(float) * 3}; // position only
+  };
+
+  struct DrawParams {
+    bool depthTest{true};
+    bool cullFace{true};
+  };
+
+  Renderer() = default;
+  Renderer(const Renderer&) = delete;
+  Renderer& operator=(const Renderer&) = delete;
+  Renderer(Renderer&&) = delete;
+  Renderer& operator=(Renderer&&) = delete;
+
+  ~Renderer() { shutdown(); }
+
+  // Lifecycle
+  bool init() noexcept;
+  void shutdown() noexcept;
+
+  // Per-frame
+  void beginFrame(float r, float g, float b, float a) const noexcept;
+  void endFrame() const noexcept;
+
+  // Global state
+  void setViewport(int x, int y, int w, int h) const noexcept;
+  void setDepthTest(bool enable) const noexcept;
+  void setCullFace(bool enable) const noexcept;
+
+  // Camera (column-major 4x4)
+  void setViewProjection(std::span<const float, 16> view, std::span<const float, 16> proj) noexcept;
+
+  // Resources
+  [[nodiscard]] ShaderHandle createShader(std::string_view vsSrc, std::string_view fsSrc);
+  void destroyShader(ShaderHandle h) noexcept;
+
+  [[nodiscard]] BufferHandle createBuffer(const BufferDesc& desc, std::span<const std::byte> initial = {}) ;
+  void updateBuffer(BufferHandle h, std::span<const std::byte> data, size_t dstOffsetBytes = 0);
+  void destroyBuffer(BufferHandle h) noexcept;
+
+  [[nodiscard]] MeshHandle createMesh(const MeshDesc& md, BufferHandle vbo, std::optional<BufferHandle> ibo = std::nullopt);
+  void destroyMesh(MeshHandle h) noexcept;
+
+  [[nodiscard]] MaterialHandle createMaterial(ShaderHandle shader);
+  void destroyMaterial(MaterialHandle h) noexcept;
+
+  // Drawing
+  void drawMesh(MeshHandle mesh, MaterialHandle material, const DrawParams* params = nullptr) const noexcept;
+
+private:
+  // Internal GL resource records
+  struct GLShader {
+    GLuint prog{0};
+    GLint locView{-1};
+    GLint locProj{-1};
+  };
+  struct GLBuffer {
+    GLuint id{0};
+    BufferType type{BufferType::Vertex};
+    size_t size{0};
+  };
+  struct GLMesh {
+    GLuint vao{0};
+    BufferHandle vbo{0};
+    BufferHandle ibo{0};
+    bool indexed{true};
+    GLenum indexTypeGL{GL_UNSIGNED_INT};
+    GLsizei vertexCount{0};
+    GLsizei indexCount{0};
+    GLsizei vertexStride{sizeof(float)*3};
+  };
+  struct GLMaterial {
+    ShaderHandle shader{0};
+    bool depthTest{true};
+    bool cullFace{true};
+  };
+
+  // Handle allocators
+  ShaderHandle   nextShader_{1};
+  BufferHandle   nextBuffer_{1};
+  MeshHandle     nextMesh_{1};
+  MaterialHandle nextMaterial_{1};
+
+  // Stores
+  std::unordered_map<ShaderHandle,   GLShader>   shaders_;
+  std::unordered_map<BufferHandle,   GLBuffer>   buffers_;
+  std::unordered_map<MeshHandle,     GLMesh>     meshes_;
+  std::unordered_map<MaterialHandle, GLMaterial> materials_;
+
+  // Camera cache
+  std::array<float, 16> view_{};
+  std::array<float, 16> proj_{};
+
+  // Helpers
+  [[nodiscard]] static GLenum toGL(BufferType t) noexcept;
+  [[nodiscard]] static GLenum toGL(IndexType t) noexcept;
+  [[nodiscard]] static size_t bytesPerIndex(IndexType t) noexcept;
+
+  [[nodiscard]] GLuint compile(GLenum type, std::string_view src);
+};
+
+// ===== Implementation =====
+
+inline bool Renderer::init() noexcept {
+  glEnable(GL_DEPTH_TEST);
+  glEnable(GL_CULL_FACE);
+  glCullFace(GL_BACK);
+  glDisable(GL_BLEND);
+  return true;
+}
+
+inline void Renderer::shutdown() noexcept {
+  for (auto& [_, m] : meshes_)   glDeleteVertexArrays(1, &m.vao);
+  for (auto& [_, b] : buffers_)  glDeleteBuffers(1, &b.id);
+  for (auto& [_, s] : shaders_)  glDeleteProgram(s.prog);
+  meshes_.clear(); buffers_.clear(); shaders_.clear(); materials_.clear();
+}
+
+inline void Renderer::beginFrame(float r, float g, float b, float a) const noexcept {
+  glClearColor(r, g, b, a);
+  glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
+}
+
+inline void Renderer::endFrame() const noexcept {
+  // Swap은 외부 프레임워크 담당
+}
+
+inline void Renderer::setViewport(int x, int y, int w, int h) const noexcept {
+  glViewport(x, y, w, h);
+}
+
+inline void Renderer::setDepthTest(bool enable) const noexcept {
+  if (enable) glEnable(GL_DEPTH_TEST); else glDisable(GL_DEPTH_TEST);
+}
+
+inline void Renderer::setCullFace(bool enable) const noexcept {
+  if (enable) glEnable(GL_CULL_FACE); else glDisable(GL_CULL_FACE);
+}
+
+inline void Renderer::setViewProjection(std::span<const float, 16> view, std::span<const float, 16> proj) noexcept {
+  std::memcpy(view_.data(), view.data(), sizeof(float)*16);
+  std::memcpy(proj_.data(), proj.data(), sizeof(float)*16);
+}
+
+inline GLenum Renderer::toGL(BufferType t) noexcept {
+  switch (t) {
+    case BufferType::Vertex:  return GL_ARRAY_BUFFER;
+    case BufferType::Index:   return GL_ELEMENT_ARRAY_BUFFER;
+    case BufferType::Uniform: return GL_UNIFORM_BUFFER;
+  }
+  return GL_ARRAY_BUFFER;
+}
+
+inline GLenum Renderer::toGL(IndexType t) noexcept {
+  switch (t) {
+    case IndexType::U8:  return GL_UNSIGNED_BYTE;
+    case IndexType::U16: return GL_UNSIGNED_SHORT;
+    case IndexType::U32: return GL_UNSIGNED_INT;
+  }
+  return GL_UNSIGNED_INT;
+}
+
+inline size_t Renderer::bytesPerIndex(IndexType t) noexcept {
+  switch (t) {
+    case IndexType::U8:  return 1;
+    case IndexType::U16: return 2;
+    case IndexType::U32: return 4;
+  }
+  return 4;
+}
+
+inline GLuint Renderer::compile(GLenum type, std::string_view src) {
+  GLuint s = glCreateShader(type);
+  const char* ptr = src.data();
+  GLint len = static_cast<GLint>(src.size());
+  glShaderSource(s, 1, &ptr, &len);
+  glCompileShader(s);
+  GLint ok = 0;
+  glGetShaderiv(s, GL_COMPILE_STATUS, &ok);
+  if (!ok) {
+    GLint logLen = 0; glGetShaderiv(s, GL_INFO_LOG_LENGTH, &logLen);
+    std::string log(std::max(0, logLen), '\0');
+    if (logLen > 0) glGetShaderInfoLog(s, logLen, nullptr, log.data());
+    glDeleteShader(s);
+    throw std::runtime_error("Shader compile failed: " + log);
+  }
+  return s;
+}
+
+inline Renderer::ShaderHandle Renderer::createShader(std::string_view vsSrc, std::string_view fsSrc) {
+  GLuint vs = compile(GL_VERTEX_SHADER,   vsSrc);
+  GLuint fs = compile(GL_FRAGMENT_SHADER, fsSrc);
+
+  GLuint prog = glCreateProgram();
+  glAttachShader(prog, vs);
+  glAttachShader(prog, fs);
+  glLinkProgram(prog);
+  glDeleteShader(vs);
+  glDeleteShader(fs);
+
+  GLint ok = 0; glGetProgramiv(prog, GL_LINK_STATUS, &ok);
+  if (!ok) {
+    GLint logLen = 0; glGetProgramiv(prog, GL_INFO_LOG_LENGTH, &logLen);
+    std::string log(std::max(0, logLen), '\0');
+    if (logLen > 0) glGetProgramInfoLog(prog, logLen, nullptr, log.data());
+    glDeleteProgram(prog);
+    throw std::runtime_error("Program link failed: " + log);
+  }
+
+  GLShader sh{};
+  sh.prog   = prog;
+  sh.locView = glGetUniformLocation(prog, "uView");
+  sh.locProj = glGetUniformLocation(prog, "uProj");
+
+  ShaderHandle h = nextShader_++;
+  shaders_.emplace(h, sh);
+  return h;
+}
+
+inline void Renderer::destroyShader(ShaderHandle h) noexcept {
+  if (auto it = shaders_.find(h); it != shaders_.end()) {
+    glDeleteProgram(it->second.prog);
+    shaders_.erase(it);
+  }
+}
+
+inline Renderer::BufferHandle Renderer::createBuffer(const BufferDesc& desc, std::span<const std::byte> initial) {
+  GLuint id = 0; glGenBuffers(1, &id);
+  const GLenum target = toGL(desc.type);
+  glBindBuffer(target, id);
+  const GLsizeiptr sz = static_cast<GLsizeiptr>(desc.size);
+  const void* dataPtr = initial.empty() ? nullptr : initial.data();
+  glBufferData(target, sz, dataPtr, desc.usage);
+
+  GLBuffer b{};
+  b.id = id; b.type = desc.type; b.size = desc.size;
+  BufferHandle h = nextBuffer_++;
+  buffers_.emplace(h, b);
+  return h;
+}
+
+inline void Renderer::updateBuffer(BufferHandle h, std::span<const std::byte> data, size_t dstOffsetBytes) {
+  auto it = buffers_.find(h);
+  if (it == buffers_.end()) throw std::runtime_error("updateBuffer: invalid handle");
+  const auto& b = it->second;
+  const GLenum target = toGL(b.type);
+  if (dstOffsetBytes + data.size_bytes() > b.size)
+    throw std::out_of_range("updateBuffer: write exceeds buffer size");
+
+  glBindBuffer(target, b.id);
+  glBufferSubData(target, static_cast<GLintptr>(dstOffsetBytes),
+                  static_cast<GLsizeiptr>(data.size_bytes()), data.data());
+}
+
+inline void Renderer::destroyBuffer(BufferHandle h) noexcept {
+  if (auto it = buffers_.find(h); it != buffers_.end()) {
+    glDeleteBuffers(1, &it->second.id);
+    buffers_.erase(it);
+  }
+}
+
+inline Renderer::MeshHandle Renderer::createMesh(const MeshDesc& md, BufferHandle vbo, std::optional<BufferHandle> ibo) {
+  const auto vbIt = buffers_.find(vbo);
+  if (vbIt == buffers_.end()) throw std::runtime_error("createMesh: invalid VBO");
+
+  if (md.indexed && (!ibo.has_value() || !buffers_.contains(*ibo)))
+    throw std::runtime_error("createMesh: indexed mesh requires valid IBO");
+
+  GLuint vao = 0; glGenVertexArrays(1, &vao);
+  glBindVertexArray(vao);
+
+  const auto& vb = vbIt->second;
+  glBindBuffer(GL_ARRAY_BUFFER, vb.id);
+
+  // location 0 = position(vec3), tightly packed
+  glEnableVertexAttribArray(0);
+  glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, md.vertexStride, reinterpret_cast<void*>(0));
+
+  GLsizei vertexCount = static_cast<GLsizei>(vb.size / md.vertexStride);
+
+  GLsizei indexCount = 0;
+  GLenum  indexTypeGL = toGL(md.indexType);
+  BufferHandle iboH = 0;
+  if (md.indexed) {
+    iboH = *ibo;
+    const auto& ib = buffers_.at(iboH);
+    glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, ib.id);
+    indexCount = static_cast<GLsizei>(ib.size / bytesPerIndex(md.indexType));
+  }
+
+  GLMesh m{};
+  m.vao = vao; m.vbo = vbo; m.ibo = iboH;
+  m.indexed = md.indexed;
+  m.indexTypeGL = indexTypeGL;
+  m.vertexCount = vertexCount;
+  m.indexCount  = indexCount;
+  m.vertexStride = md.vertexStride;
+
+  MeshHandle mh = nextMesh_++;
+  meshes_.emplace(mh, m);
+
+  glBindVertexArray(0);
+  return mh;
+}
+
+inline void Renderer::destroyMesh(MeshHandle h) noexcept {
+  if (auto it = meshes_.find(h); it != meshes_.end()) {
+    glDeleteVertexArrays(1, &it->second.vao);
+    meshes_.erase(it);
+  }
+}
+
+inline Renderer::MaterialHandle Renderer::createMaterial(ShaderHandle shader) {
+  if (!shaders_.contains(shader)) throw std::runtime_error("createMaterial: invalid shader");
+  GLMaterial m{};
+  m.shader = shader;
+  MaterialHandle mh = nextMaterial_++;
+  materials_.emplace(mh, m);
+  return mh;
+}
+
+inline void Renderer::destroyMaterial(MaterialHandle h) noexcept {
+  materials_.erase(h);
+}
+
+inline void Renderer::drawMesh(MeshHandle meshH, MaterialHandle matH, const DrawParams* params) const noexcept {
+  const auto mit = meshes_.find(meshH);
+  const auto matIt = materials_.find(matH);
+  if (mit == meshes_.end() || matIt == materials_.end()) return;
+
+  const auto shIt = shaders_.find(matIt->second.shader);
+  if (shIt == shaders_.end()) return;
+
+  const auto& m  = mit->second;
+  const auto& sh = shIt->second;
+
+  const bool depth = params ? params->depthTest : true;
+  const bool cull  = params ? params->cullFace  : true;
+  setDepthTest(depth);
+  setCullFace(cull);
+
+  glUseProgram(sh.prog);
+  if (sh.locView >= 0) glUniformMatrix4fv(sh.locView, 1, GL_FALSE, view_.data());
+  if (sh.locProj >= 0) glUniformMatrix4fv(sh.locProj, 1, GL_FALSE, proj_.data());
+
+  glBindVertexArray(m.vao);
+  if (m.indexed) {
+    glDrawElements(GL_TRIANGLES, m.indexCount, m.indexTypeGL, reinterpret_cast<const void*>(0));
+  } else {
+    glDrawArrays(GL_TRIANGLES, 0, m.vertexCount);
+  }
+  glBindVertexArray(0);
+  glUseProgram(0);
+}
