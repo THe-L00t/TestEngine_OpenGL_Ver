@@ -16,6 +16,9 @@ public:
 	void shutdown() noexcept;
 
 	void beginFrame(float, float, float, float) const noexcept;
+
+private:
+
 };
 
 inline bool Renderer::init() noexcept {
